@@ -202,7 +202,7 @@ function renderQuestions(){
     CHOICES.forEach(c=>{
       const lab = document.createElement('label'); lab.className = 'opt'; lab.setAttribute('title', `${c.l} (${c.v})`);
       const id = `q${qn}_${c.v}`;
-      lab.innerHTML = `<input type="radio" name="q${qn}" id="${id}" value="${c.v}" required aria-labelledby="s${qn}"><span>${c.l}</span><small>(${c.v})</small>`;
+      lab.innerHTML = `<input type="radio" name="q${qn}" id="${id}" value="${c.v}" required aria-labelledby="s${qn}"><span>${c.l}</span><small></small>`;
       scale.appendChild(lab);
     });
 
