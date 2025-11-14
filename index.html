@@ -307,8 +307,8 @@ const onlyDigits = s => (s||"").replace(/\D+/g,"");
 const qs = k => new URLSearchParams(location.search).get(k) || "";
 const TOKEN = qs("token");
 
-/* ===== TEMA CLARO/ESCURO ===== */
-const THEME_KEY = "integrada_theme";
+/* ===== TEMA CLARO/ESCURO (chave própria) ===== */
+const THEME_KEY = "ic_theme";
 
 function applyTheme(theme){
   const root = document.documentElement;
@@ -460,6 +460,15 @@ const ITEMS = [
   {sec:'V. Curiosidade e Motivação para Aprender', text:'25. Mostra entusiasmo ao realizar atividades criativas e inovadoras.'}
 ];
 
+/* DOMÍNIOS (por intervalo de itens) */
+const DOMAINS = [
+  {key:"fluidez_ideias",   label:"I. Fluidez de Ideias",                    range:[1,5]},
+  {key:"originalidade",    label:"II. Originalidade",                       range:[6,10]},
+  {key:"flexibilidade",    label:"III. Flexibilidade Cognitiva",            range:[11,15]},
+  {key:"elaboracao",       label:"IV. Elaboração e Detalhamento",           range:[16,20]},
+  {key:"curiosidade_motiv",label:"V. Curiosidade e Motivação para Aprender",range:[21,25]},
+];
+
 /* ===== RENDER ===== */
 function renderQuestions(){
   const host = $("#qs"); host.innerHTML = "";
@@ -505,11 +514,14 @@ function renderQuestions(){
     row.append(stem, scale);
     host.appendChild(row);
   });
+
+  $("#progressText").textContent = `Progresso: 0/${ITEMS.length}`;
 }
 
 /* ===== ESTADO ===== */
 let patient=null, tokenRow=null, CPF="";
 const STORAGE_KEY = `IC_${TOKEN||'anon'}`;
+let startAt = Date.now();
 
 /* ===== BOOT ===== */
 (async function boot(){
@@ -563,6 +575,8 @@ const STORAGE_KEY = `IC_${TOKEN||'anon'}`;
     $("#form").style.display = "block";
     $("#progressWrap").style.display = "block";
     hideBox("#alert");
+
+    startAt = Date.now();
 
   }catch(err){
     console.error(err);
@@ -651,43 +665,78 @@ $("#clearDraft").addEventListener('click', ()=>{
   setBox('#msg','Rascunho apagado.','warn');
 });
 
-/* ===== SOMATÓRIO + INTERPRETAÇÃO ===== */
-function sumAll(){
-  let s = 0;
-  for(let i=1;i<=ITEMS.length;i++){
-    const qn = String(i).padStart(2,'0');
-    const sel = document.querySelector(`input[name="q${qn}"]:checked`);
-    s += sel ? Number(sel.value) : 0;
+/* ===== DOMÍNIOS / METRICS ===== */
+function getDomainForItem(i){
+  for(const d of DOMAINS){
+    const [start,end] = d.range;
+    if(i >= start && i <= end) return d;
   }
-  return s;
+  return null;
 }
+
+function collectAll(){
+  const answersMap = {};
+  const questionsReadable = {};
+  const domainSums = {};
+  const domainCounts = {};
+
+  DOMAINS.forEach(d=>{
+    domainSums[d.key] = 0;
+    domainCounts[d.key] = 0;
+  });
+
+  for(let i=1;i<=ITEMS.length;i++){
+    const qn = String(i).padStart(2,"0");
+    const sel = document.querySelector(`input[name="q${qn}"]:checked`);
+    let value = null;
+    let label = "";
+
+    if(sel){
+      value = Number(sel.value);
+      label = SCALE_LABELS[value] || String(value);
+    }
+
+    const domain = getDomainForItem(i);
+    if(value !== null && domain){
+      domainSums[domain.key] += value;
+      domainCounts[domain.key] += 1;
+    }
+
+    const item = ITEMS[i-1];
+
+    answersMap[qn] = value;
+    questionsReadable[qn] = {
+      domainKey: domain ? domain.key : "",
+      domainLabel: domain ? domain.label : "",
+      text: item.text,
+      value: value,
+      label: label
+    };
+  }
+
+  const domainsResult = {};
+  DOMAINS.forEach(d=>{
+    const soma = domainSums[d.key] || 0;
+    const itens = d.range[1] - d.range[0] + 1;
+    const media = itens > 0 ? soma / itens : 0;
+    domainsResult[d.key] = {
+      label: d.label,
+      soma,
+      media,
+      itens
+    };
+  });
+
+  const total = Object.values(domainsResult).reduce((s,d)=> s + d.soma, 0);
+  return { answersMap, questionsReadable, domainsResult, total };
+}
+
+/* ===== INTERPRETAÇÃO GLOBAL ===== */
 function interpretation(total){
   if (total >= 75) return "Forte potencial criativo. Recomenda-se o estímulo a atividades que favoreçam o desenvolvimento criativo.";
   if (total >= 50) return "Boa presença de criatividade, mas com espaço para desenvolvimento.";
   if (total >= 25) return "Criatividade moderada. Pode se beneficiar de técnicas de estimulação criativa.";
   return "Baixo desempenho criativo. Sugere-se um acompanhamento para incentivo ao pensamento criativo.";
-}
-
-/* ===== COLETA DAS PERGUNTAS/RESPOSTAS PARA A COLUNA 'questions' ===== */
-function getAnswerLabel(qIndex){
-  const qn = String(qIndex).padStart(2,"0");
-  const sel = document.querySelector(`input[name="q${qn}"]:checked`);
-  if(!sel) return "";
-  const val = Number(sel.value);
-  return SCALE_LABELS[val] || String(val);
-}
-
-function collectQuestionsAnswersJSON(){
-  const arr = [];
-  for(let i=1;i<=ITEMS.length;i++){
-    const qObj = ITEMS[i-1];
-    const label = getAnswerLabel(i);
-    if(!label) continue;
-    const obj = {};
-    obj[qObj.text] = label;
-    arr.push(obj);
-  }
-  return arr;
 }
 
 /* ===== SUBMIT ===== */
@@ -706,22 +755,51 @@ $("#form").addEventListener("submit", async (e)=>{
   try{
     if(!patient) throw new Error("Sessão inválida. Recarregue o link.");
 
-    // Validação: todas respondidas
+    // Validação: todas respondidas (lista de faltantes)
+    const missing = [];
+    let firstMissingRow = null;
+
     for(let i=1;i<=ITEMS.length;i++){
       const qn = String(i).padStart(2,'0');
       const sel = document.querySelector(`input[name="q${qn}"]:checked`);
       if(!sel){
-        const row = document.querySelector(`.item[data-q="${i}"]`);
-        if(row) row.scrollIntoView({behavior:'smooth', block:'center'});
-        throw new Error(`Responda o item ${i}.`);
+        missing.push(i);
+        if(!firstMissingRow){
+          const row = document.querySelector(`.item[data-q="${i}"]`);
+          if(row) firstMissingRow = row;
+        }
       }
     }
 
-    const total = sumAll();
-    const categoria_txt = interpretation(total);
+    if(missing.length){
+      if(firstMissingRow){
+        firstMissingRow.scrollIntoView({behavior:'smooth', block:'center'});
+      }
+      throw new Error(`Você ainda não respondeu os itens: ${missing.join(", ")}.`);
+    }
 
-    // JSON auditável: [{ "pergunta": "rótulo" }, ...]
-    const questionsArr = collectQuestionsAnswersJSON();
+    // Anti-duplicidade antes de gravar
+    const again = await sheetSearch(SHEETS.SCORES, { cpf: CPF, code: CODE });
+    if(again && again.length){
+      setBox("#msg","Este formulário já foi enviado anteriormente. Voltando ao portal…","ok");
+      setTimeout(goPortalWithToken,1000);
+      return;
+    }
+
+    const { answersMap, questionsReadable, domainsResult, total } = collectAll();
+    const categoria_txt = interpretation(total);
+    const durationSec = Math.round((Date.now()-startAt)/1000);
+
+    const metricsObj = {
+      total_bruto: total,
+      duration_sec: durationSec,
+      interpretacao_global: categoria_txt,
+      domains: domainsResult,
+      answers: answersMap,
+      answers_readable: questionsReadable
+    };
+
+    const categoria_csv = `interpretacao=${categoria_txt.replace(/,/g,";")}`;
 
     await sheetCreate(SHEETS.SCORES, {
       result_id: `${patient.cpf}_${CODE}_${Date.now()}`,
@@ -730,10 +808,10 @@ $("#form").addEventListener("submit", async (e)=>{
       code: CODE,
       source: "paciente",
       submitted_at: new Date().toISOString(),
-      total: total,
-      categoria: categoria_txt,  // mantém a frase de interpretação aqui
+      total: "",
+      categoria: categoria_csv,
       metrics: "",
-      questions: JSON.stringify(questionsArr)
+      questions: JSON.stringify(questionsReadable)
     });
 
     // Marca como feito
